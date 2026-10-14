@@ -1,0 +1,3 @@
+[submodule "targets/cosmicpython"]
+	path = targets/cosmicpython
+	url = https://github.com/cosmicpython/code

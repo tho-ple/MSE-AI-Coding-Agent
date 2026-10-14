@@ -1,0 +1,10 @@
+# Sandbox image for running the Cosmic Python target's code and tests.
+# The harness mounts the disposable repo copy at /workspace (rw) and the
+# acceptance checks at /checks (ro), and runs with --network none,
+# --read-only, --cap-drop ALL, memory/CPU/PID limits.
+FROM python:3.11-slim
+COPY requirements-cosmic.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt \
+    && useradd --create-home --uid 1000 sandbox
+USER sandbox
+WORKDIR /workspace

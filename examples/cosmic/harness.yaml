@@ -1,0 +1,55 @@
+# Cosmic Python demo - copy and adjust. Contains no secrets.
+# Relative paths are resolved against this file's directory.
+
+model:
+  provider: ollama
+  name: qwen2.5-coder:14b          # override with env HARNESS_MODEL
+  base_url: http://localhost:11434 # override with env OLLAMA_HOST
+  temperature: 0
+  num_ctx: 16384
+
+target:
+  repo: ../../targets/cosmicpython
+  commit: 14c84797ffa77255d53cf1a02fe6aafda2b68aeb   # exact starting commit (exported, not the working tree)
+  writable:                        # globs the agent may edit; everything else is read-only
+    - src/allocation/domain/model.py
+    - src/allocation/service_layer/handlers.py
+    - tests/unit/*.py
+
+sandbox:
+  backend: docker                  # contained (Docker/Podman, native or in WSL); --sandbox local as fallback
+  container_engine: auto           # docker | podman | wsl docker | wsl podman (env HARNESS_CONTAINER_ENGINE)
+  docker_image: coding-harness-cosmic:latest
+  dockerfile: ../../sandbox/Dockerfile.cosmic   # built by: harness build-image --config <this file>
+  resource_limits: auto            # on for Docker; off for rootless Podman (no cgroup access)
+  docker_memory: 1g
+  docker_cpus: "1"
+  python: ../../targets/.venv-cosmic/Scripts/python.exe   # only used by backend: local
+  env:
+    PYTHONPATH: src
+
+# Commands the agent may run by name during the loop.
+commands:
+  unit_tests: "{python} -m pytest tests/unit -q -p no:cacheprovider"
+
+# Checks the harness always runs after the loop (agent cannot see or edit them).
+checks_dir: acceptance
+baseline_copy:
+  - tests/unit                     # pristine copy of the existing tests from the starting commit
+checks:
+  - name: acceptance
+    command: "{python} -m pytest -c {checks}/pytest.ini --rootdir {checks} {checks}/test_acceptance_change_batch_quantity.py -q"
+  - name: regression (original unit tests)
+    command: "{python} -m pytest -c {checks}/pytest.ini --rootdir {checks} {checks}/baseline/tests/unit -q"
+  - name: regression (unit tests in workspace)
+    command: "{python} -m pytest tests/unit -q -p no:cacheprovider"
+
+limits:
+  max_actions: 30
+  max_denied: 5
+  max_retries: 3
+  max_output_chars: 6000
+  max_read_chars: 20000
+  command_timeout_s: 120
+
+runs_dir: ../../runs
