@@ -36,10 +36,11 @@ class CommandResult:
     duration_s: float
     timed_out: bool = False
     error: str | None = None  # sandbox-level failure (e.g. docker missing)
+    cancelled: bool = False  # stopped by the user; process tree killed
 
     @property
     def ok(self) -> bool:
-        return self.exit_code == 0 and not self.timed_out and self.error is None
+        return self.exit_code == 0 and not self.timed_out and self.error is None and not self.cancelled
 
 
 class Sandbox(ABC):
@@ -69,7 +70,8 @@ class Sandbox(ABC):
     def workspace_path(self) -> str: ...
 
     @abstractmethod
-    def run(self, command: str, timeout_s: int) -> CommandResult: ...
+    def run(self, command: str, timeout_s: int, cancel=None) -> CommandResult:
+        """Run ``command``; stop it (whole process tree) on timeout or when ``cancel.is_set()``."""
 
     def describe(self) -> str:
         return self.name
@@ -159,7 +161,7 @@ class LocalSandbox(Sandbox):
         env.update(self.settings.env)
         return env
 
-    def run(self, command: str, timeout_s: int) -> CommandResult:
+    def run(self, command: str, timeout_s: int, cancel=None) -> CommandResult:
         start = time.monotonic()
         home = tempfile.mkdtemp(prefix="harness-home-")
         out_path = Path(home) / "_output.txt"
@@ -187,17 +189,22 @@ class LocalSandbox(Sandbox):
                 # orphans cannot be found from the tree once their parent has exited.
                 seen: dict[int, psutil.Process] = {}
                 deadline = start + timeout_s
+                cancelled = False
                 while proc.poll() is None and time.monotonic() < deadline:
                     self._track(proc.pid, seen)
+                    if cancel is not None and cancel.is_set():
+                        cancelled = True
+                        break
                     time.sleep(0.1)
-                timed_out = proc.poll() is None
-                # Kill the shell (on timeout) and anything it left behind (always).
-                self._kill(proc, job, seen, only_children=not timed_out)
-                if timed_out:
+                stopped = proc.poll() is None
+                timed_out = stopped and not cancelled
+                # Kill the shell (on timeout/cancel) and anything it left behind (always).
+                self._kill(proc, job, seen, only_children=not stopped)
+                if stopped:
                     proc.wait(timeout=10)
             output = out_path.read_text(encoding="utf-8", errors="replace")
-            return CommandResult(command, None if timed_out else proc.returncode, output,
-                                 time.monotonic() - start, timed_out=timed_out)
+            return CommandResult(command, None if stopped else proc.returncode, output,
+                                 time.monotonic() - start, timed_out=timed_out, cancelled=cancelled and stopped)
         finally:
             if job:
                 job.close()
@@ -348,7 +355,7 @@ class DockerSandbox(Sandbox):
     def workspace_path(self) -> str:
         return "/workspace"
 
-    def run(self, command: str, timeout_s: int) -> CommandResult:
+    def run(self, command: str, timeout_s: int, cancel=None) -> CommandResult:
         start = time.monotonic()
         engine = self.engine
         if engine is None:
@@ -371,17 +378,38 @@ class DockerSandbox(Sandbox):
         for k, v in self.settings.env.items():
             argv += ["-e", f"{k}={v}"]
         argv += [self.settings.docker_image, "sh", "-c", command]
+        out_file = tempfile.TemporaryFile()
         try:
-            proc = subprocess.run(argv, capture_output=True, timeout=timeout_s)
-            output = (proc.stdout + proc.stderr).decode("utf-8", errors="replace")
+            try:
+                proc = subprocess.Popen(argv, stdout=out_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+            except OSError as e:
+                return CommandResult(command, None, "", 0.0, error=str(e))
+            deadline = start + timeout_s
+            cancelled = False
+            while proc.poll() is None and time.monotonic() < deadline:
+                if cancel is not None and cancel.is_set():
+                    cancelled = True
+                    break
+                time.sleep(0.1)
+            stopped = proc.poll() is None
+            if stopped:  # timeout or cancel: kill the container (all its processes), then the client
+                subprocess.run(engine.prefix + ["kill", name], capture_output=True, timeout=60)
+                try:
+                    proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            out_file.seek(0)
+            output = out_file.read().decode("utf-8", errors="replace")
+            if stopped:
+                return CommandResult(command, None, output, time.monotonic() - start,
+                                     timed_out=not cancelled, cancelled=cancelled)
             err = None
             if proc.returncode == 125:  # the engine itself failed (image missing, daemon down...)
                 err = f"{engine.label} failed to start the container: {output.strip()[:500]}"
             return CommandResult(command, proc.returncode, output, time.monotonic() - start, error=err)
-        except subprocess.TimeoutExpired as e:
-            subprocess.run(engine.prefix + ["kill", name], capture_output=True)
-            out = ((e.stdout or b"") + (e.stderr or b"")).decode("utf-8", errors="replace")
-            return CommandResult(command, None, out, time.monotonic() - start, timed_out=True)
+        finally:
+            out_file.close()
 
     def build_image(self, dockerfile: str | Path) -> int:
         """Build ``docker_image`` from ``dockerfile`` with the resolved engine. Returns the exit code."""

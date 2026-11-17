@@ -48,6 +48,12 @@ class CheckSpec:
     name: str
     command: str
     timeout_s: int | None = None
+    kind: str = "test"  # "test" | "lint" | "build" (display and grouping only)
+    # Optional availability probe. If it fails, the check is reported as "unavailable" (never passed).
+    probe: str | None = None
+    # Baseline expectation on the starting code (``harness baseline`` verifies it):
+    expect_on_start: str | None = None  # e.g. "failed"
+    expect_reason: str | None = None  # regex that must appear in the output on the starting code
 
 
 @dataclass
@@ -60,6 +66,24 @@ class LimitSettings:
     max_search_results: int = 50
     max_list_entries: int = 300
     command_timeout_s: int = 120
+    # Edit-test-fix loop: how often failed final checks are fed back to the model.
+    # 0 = verify once (Stage 1 behaviour). The example configs use 3.
+    max_fix_rounds: int = 0
+    fix_feedback_chars: int = 2500  # check output per failed check fed back to the model
+
+
+@dataclass
+class ContextSettings:
+    """Size limits for what is sent to the model per request (see README "Context")."""
+
+    max_chars: int = 48000  # whole message list per model request (~12k tokens at ~4 chars/token)
+    repo_map_chars: int = 3500  # compact repository map in the first message
+    selected_files: int = 6  # ranked relevant files listed in the first message
+    excerpt_chars: int = 9000  # total budget for file excerpts of the top-ranked files
+    excerpt_files: int = 3  # how many top-ranked files get an excerpt
+    keep_recent_groups: int = 6  # newest model turns (reply + tool results) kept verbatim
+    old_tool_output_chars: int = 500  # older tool results are shortened to this
+    summary_chars: int = 3000  # harness summary that replaces dropped turns
 
 
 @dataclass
@@ -68,6 +92,9 @@ class Settings:
     target: TargetSettings = field(default_factory=TargetSettings)
     sandbox: SandboxSettings = field(default_factory=SandboxSettings)
     limits: LimitSettings = field(default_factory=LimitSettings)
+    context: ContextSettings = field(default_factory=ContextSettings)
+    # Trusted acceptance criteria shown to the model with the request (never compressed away).
+    acceptance_criteria: list[str] = field(default_factory=list)
     # Named commands the agent may run during the loop (e.g. unit tests).
     commands: dict[str, str] = field(default_factory=dict)
     # Checks that always run after the loop. The model cannot skip or edit them.
@@ -125,9 +152,52 @@ def load_settings(path: str | Path) -> Settings:
         target=target,
         sandbox=sandbox,
         limits=_sub(LimitSettings, raw.get("limits")),
+        context=_sub(ContextSettings, raw.get("context")),
+        acceptance_criteria=[str(c) for c in raw.get("acceptance_criteria") or []],
         commands=dict(raw.get("commands") or {}),
         checks=[_sub(CheckSpec, c) for c in raw.get("checks") or []],
         checks_dir=rel(raw.get("checks_dir")),
         baseline_copy=list(raw.get("baseline_copy") or []),
         runs_dir=rel(raw.get("runs_dir", "runs")),
     )
+
+
+# ------------------------------------------------------------------ allowed projects
+@dataclass
+class ProjectEntry:
+    name: str
+    config: Path
+    description: str = ""
+
+
+@dataclass
+class ProjectRegistry:
+    """The projects a user may select. Anything not listed here cannot be started or resumed."""
+
+    path: Path
+    sessions_dir: Path
+    projects: dict[str, ProjectEntry]
+
+    def get(self, name: str) -> ProjectEntry:
+        if name not in self.projects:
+            allowed = ", ".join(sorted(self.projects)) or "none"
+            raise KeyError(f"project {name!r} is not in the allowed projects ({allowed}) of {self.path}")
+        return self.projects[name]
+
+
+def load_projects(path: str | Path) -> ProjectRegistry:
+    path = Path(path).resolve()
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    base = path.parent
+    unknown = set(raw) - {"sessions_dir", "projects"}
+    if unknown:
+        raise ValueError(f"Unknown keys in {path.name}: {sorted(unknown)}")
+    projects = {}
+    for name, entry in (raw.get("projects") or {}).items():
+        if not isinstance(entry, dict) or "config" not in entry:
+            raise ValueError(f"project {name!r} needs a 'config' path")
+        cfg = Path(entry["config"])
+        projects[name] = ProjectEntry(name, cfg if cfg.is_absolute() else (base / cfg).resolve(),
+                                      str(entry.get("description", "")))
+    sessions = Path(raw.get("sessions_dir", "runs"))
+    return ProjectRegistry(path, sessions if sessions.is_absolute() else (base / sessions).resolve(), projects)

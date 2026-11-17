@@ -33,3 +33,6 @@ demo.md
 *.swp
 .DS_Store
 Thumbs.db
+
+# Course material (assignment PDFs), not part of the delivery
+stage-*.pdf

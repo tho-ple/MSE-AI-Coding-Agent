@@ -1,0 +1,82 @@
+# Stage 2 feature task on Cosmic Python: Deallocate command across commands, domain model and
+# service layer. Contains no secrets. Relative paths are resolved against this file's directory.
+
+model:
+  provider: ollama
+  name: qwen2.5-coder:14b          # override with env HARNESS_MODEL
+  base_url: http://localhost:11434 # override with env OLLAMA_HOST
+  temperature: 0
+  num_ctx: 32768                   # qwen2.5-coder supports 32k; context.max_chars stays well below
+
+target:
+  repo: ../../targets/cosmicpython
+  commit: 14c84797ffa77255d53cf1a02fe6aafda2b68aeb   # exact starting commit (exported, not the working tree)
+  writable:                        # allowed changes; everything else is read-only
+    - src/allocation/domain/*.py
+    - src/allocation/service_layer/*.py
+    - tests/unit/*.py
+
+sandbox:
+  backend: docker                  # contained (Docker/Podman, native or in WSL); --sandbox local as fallback
+  container_engine: auto           # docker | podman | wsl docker | wsl podman (env HARNESS_CONTAINER_ENGINE)
+  docker_image: coding-harness-cosmic:latest
+  dockerfile: ../../sandbox/Dockerfile.cosmic   # built by: harness build-image --config <this file>
+  resource_limits: auto
+  docker_memory: 1g
+  docker_cpus: "1"
+  python: ../../targets/.venv-cosmic/Scripts/python.exe   # only used by backend: local
+  env:
+    PYTHONPATH: src
+
+acceptance_criteria:
+  - "commands.Deallocate(orderid, sku, qty) is handled by the message bus and frees the allocated stock (commit)"
+  - "Product.deallocate(line) returns the batch reference and increments version_number; no Deallocated event"
+  - "an order line that is not allocated raises model.NotAllocated (message contains the order id); nothing committed"
+  - "an unknown SKU raises handlers.InvalidSku"
+  - "Allocate, CreateBatch and ChangeBatchQuantity keep working; existing unit and integration tests pass"
+
+# Commands the agent may run by name during the loop.
+commands:
+  unit_tests: "{python} -m pytest tests/unit -q -p no:cacheprovider"
+
+# Checks the harness always runs after the loop (outside the agent's writable area).
+checks_dir: acceptance
+baseline_copy:
+  - tests/unit                     # pristine copy of the existing tests from the starting commit
+  - src/allocation                 # pristine sources, used by the lint check to report only NEW warnings
+checks:
+  - name: acceptance (feature)
+    command: "{python} -m pytest -c {checks}/pytest.ini --rootdir {checks} {checks}/test_feature_deallocate.py -q"
+    expect_on_start: failed
+    expect_reason: "has no attribute 'Deallocate'"
+  - name: regression (original unit tests)
+    command: "{python} -m pytest -c {checks}/pytest.ini --rootdir {checks} {checks}/baseline/tests/unit -q"
+  - name: regression (unit tests in workspace)
+    command: "{python} -m pytest tests/unit -q -p no:cacheprovider"
+  - name: regression (integration, sqlite)
+    command: "{python} -m pytest tests/integration -q -p no:cacheprovider -k \"not concurrent\" --ignore tests/integration/test_email.py"
+  - name: lint (new pyflakes warnings)
+    kind: lint
+    probe: "{python} -c \"import pyflakes\""
+    command: "{python} {checks}/lint_new.py {checks} {changed_py}"
+  - name: build (byte-compile)
+    kind: build
+    command: "{python} -m compileall -q src"
+
+limits:
+  max_actions: 40
+  max_denied: 6
+  max_retries: 3
+  max_fix_rounds: 3
+  max_output_chars: 6000
+  max_read_chars: 20000
+  command_timeout_s: 180
+
+context:
+  max_chars: 60000                 # ~15k tokens per request; fits num_ctx 32768 with room for the reply
+  repo_map_chars: 3500
+  selected_files: 6
+  excerpt_files: 3
+  excerpt_chars: 9000
+
+runs_dir: ../../runs

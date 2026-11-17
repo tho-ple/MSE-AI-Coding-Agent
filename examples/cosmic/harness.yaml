@@ -48,6 +48,7 @@ limits:
   max_actions: 30
   max_denied: 5
   max_retries: 3
+  max_fix_rounds: 2
   max_output_chars: 6000
   max_read_chars: 20000
   command_timeout_s: 120

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import shutil
 import subprocess
 import uuid
@@ -67,7 +68,7 @@ class Workspace:
             dirs.workspace.mkdir(parents=True)
             archive = root / "start.tar"
             _git(src, "archive", "--format=tar", "-o", str(archive), settings.target.commit)
-            shutil.unpack_archive(archive, dirs.workspace)
+            shutil.unpack_archive(archive, dirs.workspace, filter="data")
             archive.unlink()
         else:
             shutil.copytree(src, dirs.workspace, ignore=shutil.ignore_patterns(*settings.target.ignore))
@@ -93,6 +94,13 @@ class Workspace:
                 shutil.copy2(s, d)
 
         return cls(dirs.workspace, settings.target.writable, settings.target.ignore), dirs
+
+    @classmethod
+    def open(cls, settings: Settings, root: Path) -> "Workspace":
+        """Reopen the disposable copy of an existing session (no re-export)."""
+        if not (root / ".git").is_dir():
+            raise FileNotFoundError(f"no workspace copy at {root}")
+        return cls(root, settings.target.writable, settings.target.ignore)
 
     # ------------------------------------------------------------ path policy
     def resolve(self, rel: str, *, write: bool = False) -> Path:
@@ -123,6 +131,30 @@ class Workspace:
 
     def is_ignored(self, p: Path) -> bool:
         return any(part in self.ignore for part in p.relative_to(self.root).parts)
+
+    def iter_files(self, base: Path | None = None):
+        """Files under ``base`` (default: the copy), skipping ignored dirs, .git and escaping symlinks."""
+        base = base or self.root
+        if base.is_file():
+            yield base
+            return
+        for p in sorted(base.rglob("*")):
+            if p.is_file() and not self.is_ignored(p) and self.relpath(p).split("/")[0] != ".git":
+                if p.resolve().is_relative_to(self.root):
+                    yield p
+
+    def fingerprint(self) -> dict[str, str]:
+        """Content hash of every file in the copy (the saved working-copy state used on resume)."""
+        out = {}
+        for p in self.iter_files():
+            if p.suffix == ".pyc":
+                continue
+            out[self.relpath(p)] = hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+        return out
+
+    def head(self) -> str:
+        """Commit id of the copy's baseline commit (changes if someone commits inside the copy)."""
+        return _git(self.root, "rev-parse", "HEAD").stdout.strip()
 
     # ------------------------------------------------------------------- diff
     def diff(self) -> str:

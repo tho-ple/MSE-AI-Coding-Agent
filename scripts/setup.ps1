@@ -10,28 +10,63 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
-$Commit = "14c84797ffa77255d53cf1a02fe6aafda2b68aeb"
 
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Run {
-    & $args[0] $args[1..($args.Count - 1)]
-    if ($LASTEXITCODE -ne 0) { throw "command failed ($LASTEXITCODE): $args" }
+    $exe = $args[0]
+    $rest = @($args | Select-Object -Skip 1)
+    & $exe @rest
+    if ($LASTEXITCODE -ne 0) { throw "command failed ($LASTEXITCODE): $($args -join ' ')" }
+}
+
+# Returns the full path of a working Python >= 3.11 (skips the Microsoft Store stub).
+function Find-Python {
+    $candidates = @(
+        @("py", "-3.13"), @("py", "-3.12"), @("py", "-3.11"),
+        @("python")
+    )
+    foreach ($c in $candidates) {
+        if (-not (Get-Command $c[0] -ErrorAction SilentlyContinue)) { continue }
+        $extra = @($c | Select-Object -Skip 1)
+        try {
+            $out = & $c[0] @extra -c "import sys; print(sys.executable if sys.version_info >= (3, 11) else '')" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $out -and (Test-Path $out)) { return $out.Trim() }
+        } catch { }
+    }
+    throw "No working Python >= 3.11 found. Install it from python.org (not the Microsoft Store stub)."
+}
+
+# Creates the venv if missing, and rebuilds it if it is broken
+# (e.g. copied from another machine/user, base interpreter gone).
+function Ensure-Venv([string]$Path) {
+    $py = Join-Path $Path "Scripts\python.exe"
+    $ok = $false
+    if (Test-Path $py) {
+        try { & $py --version *> $null; $ok = ($LASTEXITCODE -eq 0) } catch { $ok = $false }
+    }
+    if (-not $ok) {
+        if (Test-Path $Path) {
+            Write-Host "$Path is broken (copied from another machine?), recreating"
+            Remove-Item -Recurse -Force $Path
+        }
+        Run $script:BasePython -m venv $Path
+    }
 }
 
 Step "Checking Python (3.11+ required)"
-Run python -c "import sys; assert sys.version_info >= (3, 11), sys.version; print(sys.version)"
+$BasePython = Find-Python
+Run $BasePython -c "import sys; print(sys.version)"
 
 Step "Harness virtualenv (.venv)"
-if (-not (Test-Path .venv)) { Run python -m venv .venv }
+Ensure-Venv ".venv"
 Run .venv\Scripts\python.exe -m pip install -q -e ".[dev]"
 
-Step "Target repository (git submodule targets/cosmicpython @ $Commit)"
-Run git submodule update --init targets/cosmicpython
-$head = (git -C targets/cosmicpython rev-parse HEAD).Trim()
-if ($head -ne $Commit) { throw "targets/cosmicpython is at $head, expected $Commit" }
+# NOTE: the target repository (targets/cosmicpython) is NOT set up here.
+# Clone it yourself when needed, e.g.:
+#   git clone https://github.com/cosmicpython/code targets/cosmicpython
 
 Step "Target test environment (targets\.venv-cosmic, used by the local sandbox backend)"
-if (-not (Test-Path targets\.venv-cosmic)) { Run python -m venv targets\.venv-cosmic }
+Ensure-Venv "targets\.venv-cosmic"
 Run targets\.venv-cosmic\Scripts\python.exe -m pip install -q -r sandbox\requirements-cosmic.txt
 
 Step "Sandbox image (container engine: docker, podman, or either one inside WSL)"
@@ -55,5 +90,8 @@ Step "Self-test (no model needed)"
 Run .venv\Scripts\python.exe -m pytest -q
 
 Write-Host "`nSetup complete. Try:" -ForegroundColor Green
+Write-Host "  .venv\Scripts\harness projects"
+Write-Host "  .venv\Scripts\harness baseline --project cosmic-feature"
+Write-Host "  .venv\Scripts\harness start --project cosmic-feature --task-file examples/cosmic-feature/task.md"
 Write-Host "  .venv\Scripts\harness baseline --config examples/cosmic-demo/harness.yaml"
 Write-Host "  .venv\Scripts\harness run --config examples/cosmic-demo/harness.yaml --task-file examples/cosmic-demo/task.md"

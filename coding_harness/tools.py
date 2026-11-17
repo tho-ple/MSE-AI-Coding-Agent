@@ -15,12 +15,13 @@ from __future__ import annotations
 import difflib
 import re
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .config import LimitSettings
 from .limits import truncate
+from .navigation import RepoIndex, git_state
 from .sandbox import CommandResult, Sandbox
 from .workspace import PathDenied, Workspace
 
@@ -66,6 +67,40 @@ class FinishArgs(_Args):
     summary: str = Field(description="What you changed and why.")
 
 
+class RepoMapArgs(_Args):
+    path: str = Field(".", description="Directory to map, relative to the repository root.")
+
+
+class SymbolArgs(_Args):
+    name: str = Field(min_length=1, max_length=200, description="Symbol name, e.g. 'allocate' or 'Product.allocate'.")
+
+
+class ReferencesArgs(_Args):
+    name: str = Field(min_length=1, max_length=200, description="Symbol name whose uses (imports, calls, attributes) to find.")
+    path: str = Field(".", description="Only search below this directory.")
+
+
+class ModuleDepsArgs(_Args):
+    path: str = Field(description="Python file, relative to the repository root.")
+
+
+class NoArgs(_Args):
+    pass
+
+
+class GitDiffArgs(_Args):
+    path: str | None = Field(None, description="Limit the diff to one file or directory.")
+
+
+class PlanItem(_Args):
+    step: str = Field(min_length=1, max_length=300)
+    status: Literal["todo", "doing", "done"] = "todo"
+
+
+class PlanArgs(_Args):
+    items: list[PlanItem] = Field(min_length=1, max_length=20, description="The full, updated plan.")
+
+
 @dataclass
 class ToolOutcome:
     tool: str
@@ -75,6 +110,8 @@ class ToolOutcome:
     finished: bool = False
     truncated: bool = False
     command: CommandResult | None = None
+    cancelled: bool = False  # a running command was stopped by the user
+    plan: list[dict] | None = None
 
 
 @dataclass
@@ -97,15 +134,31 @@ _SKIP_SEARCH_SUFFIXES = {".pyc", ".png", ".jpg", ".gif", ".ico", ".zip", ".gz", 
 
 
 class ToolRegistry:
-    def __init__(self, workspace: Workspace, sandbox: Sandbox, limits: LimitSettings, commands: dict[str, str]):
+    def __init__(self, workspace: Workspace, sandbox: Sandbox, limits: LimitSettings, commands: dict[str, str],
+                 start_commit: str | None = None):
         self.ws = workspace
         self.sandbox = sandbox
         self.limits = limits
         self.commands = commands
+        self.start_commit = start_commit
+        self._index: RepoIndex | None = None
+        self._cancel = None
         self.specs: dict[str, ToolSpec] = {}
         self._register("list_files", "List files under a directory of the repository (recursive).", ListFilesArgs, self._list_files)
         self._register("read_file", "Read a text file. Lines are prefixed with their line numbers.", ReadFileArgs, self._read_file)
         self._register("search", "Search file contents. Returns path:line: text matches.", SearchArgs, self._search)
+        self._register("repo_map", "Compact map of Python modules under a directory: classes (with methods), functions, constants.",
+                       RepoMapArgs, self._repo_map)
+        self._register("find_symbol", "Find where a class, function, method or constant is defined (file:line and signature).",
+                       SymbolArgs, self._find_symbol)
+        self._register("find_references", "Find imports, calls and uses of a symbol across Python modules (e.g. existing callers).",
+                       ReferencesArgs, self._find_references)
+        self._register("module_deps", "Show which repository modules a Python file imports and which modules import it.",
+                       ModuleDepsArgs, self._module_deps)
+        self._register("git_status", "Read-only Git state of the copy: baseline commit and files changed so far.", NoArgs, self._git_status)
+        self._register("git_diff", "Read-only: the diff of your changes so far (optionally for one path).", GitDiffArgs, self._git_diff)
+        self._register("update_plan", "Record your plan as a list of steps with status todo/doing/done. Shown to the user as progress.",
+                       PlanArgs, self._update_plan)
         self._register("edit_file", "Replace one exact, unique occurrence of old_text with new_text in a file.", EditFileArgs, self._edit_file)
         self._register("write_file", "Create a new file or overwrite an existing one with the given content.", WriteFileArgs, self._write_file)
         names = ", ".join(sorted(commands)) or "(none configured)"
@@ -120,7 +173,8 @@ class ToolRegistry:
         return [s.schema() for s in self.specs.values()]
 
     # -------------------------------------------------------------- dispatch
-    def call(self, name: str, raw_args: object) -> ToolOutcome:
+    def call(self, name: str, raw_args: object, cancel=None) -> ToolOutcome:
+        self._cancel = cancel
         spec = self.specs.get(name)
         if spec is None:
             return ToolOutcome(name, f"DENIED: unknown tool {name!r}. Available tools: {', '.join(self.specs)}.", denied=True)
@@ -145,14 +199,13 @@ class ToolRegistry:
 
     # ----------------------------------------------------------------- tools
     def _walk(self, base):
-        if base.is_file():
-            yield base
-            return
-        for p in sorted(base.rglob("*")):
-            if p.is_file() and not self.ws.is_ignored(p) and self.ws.relpath(p).split("/")[0] != ".git":
-                # Skip symlinks that point outside the copy.
-                if p.resolve().is_relative_to(self.ws.root):
-                    yield p
+        return self.ws.iter_files(base)
+
+    @property
+    def index(self) -> RepoIndex:
+        if self._index is None:
+            self._index = RepoIndex(self.ws)
+        return self._index.refresh()
 
     def _list_files(self, a: ListFilesArgs) -> ToolOutcome:
         base = self.ws.resolve(a.path)
@@ -243,16 +296,81 @@ class ToolRegistry:
             if not re.fullmatch(r"[\w./\\:\[\]-]+", a.target):
                 raise PathDenied(f"target contains disallowed characters: {a.target!r}")
             cmd += " " + self.sandbox.quote(a.target.replace("\\", "/"))
-        res = self.sandbox.run(cmd, self.limits.command_timeout_s)
-        return ToolOutcome("run_command", format_command_result(res), error=not res.ok, command=res)
+        res = self.sandbox.run(cmd, self.limits.command_timeout_s, cancel=self._cancel)
+        return ToolOutcome("run_command", format_command_result(res), error=not res.ok, command=res,
+                           cancelled=res.cancelled)
 
     def _finish(self, a: FinishArgs) -> ToolOutcome:
         return ToolOutcome("finish", "Finish acknowledged. The harness will now run the final checks.", finished=True)
+
+    # ------------------------------------------------------------ navigation
+    def _repo_map(self, a: RepoMapArgs) -> ToolOutcome:
+        base = self.ws.resolve(a.path)
+        if not base.exists():
+            return ToolOutcome("repo_map", f"ERROR: {a.path!r} does not exist.", error=True)
+        rel = self.ws.relpath(base)
+        return ToolOutcome("repo_map", self.index.repo_map(self.limits.max_output_chars, under=rel))
+
+    def _find_symbol(self, a: SymbolArgs) -> ToolOutcome:
+        hits = self.index.find_symbol(a.name)
+        if not hits:
+            return ToolOutcome("find_symbol", f"No definition of {a.name!r} found in Python modules. Try search.")
+        limit = self.limits.max_search_results
+        text = "\n".join(h.describe() for h in hits[:limit])
+        if len(hits) > limit:
+            text += f"\n[... results truncated by harness at {limit} definitions ...]"
+        return ToolOutcome("find_symbol", text, truncated=len(hits) > limit)
+
+    def _find_references(self, a: ReferencesArgs) -> ToolOutcome:
+        base = self.ws.resolve(a.path)
+        refs = self.index.find_references(a.name, self.ws.relpath(base))
+        if not refs:
+            return ToolOutcome("find_references", f"No references to {a.name!r} found in Python modules.")
+        limit = self.limits.max_search_results
+        text = "\n".join(f"{r.path}:{r.line}: [{r.kind}] {r.text}" for r in refs[:limit])
+        if len(refs) > limit:
+            text += f"\n[... results truncated by harness at {limit} references ...]"
+        return ToolOutcome("find_references", text, truncated=len(refs) > limit)
+
+    def _module_deps(self, a: ModuleDepsArgs) -> ToolOutcome:
+        p = self.ws.resolve(a.path)
+        rel = self.ws.relpath(p)
+        try:
+            m, deps, rdeps = self.index.module_deps(rel)
+        except KeyError:
+            return ToolOutcome("module_deps", f"ERROR: {a.path!r} is not a Python module of the repository.", error=True)
+        lines = [f"{rel} (module {m.module})",
+                 "imports: " + (", ".join(deps) or "(no repository modules)"),
+                 "imported by: " + (", ".join(rdeps) or "(no repository modules)")]
+        internal_roots = {self.index.modules[d].module.split(".")[0] for d in deps}
+        ext = sorted({i.split(".")[0] for i in m.imports if i} - internal_roots)
+        if ext:
+            lines.append("external: " + ", ".join(ext))
+        return ToolOutcome("module_deps", "\n".join(lines))
+
+    def _git_status(self, a: NoArgs) -> ToolOutcome:
+        return ToolOutcome("git_status", git_state(self.ws, self.start_commit))
+
+    def _git_diff(self, a: GitDiffArgs) -> ToolOutcome:
+        diff = self.ws.diff()
+        if a.path:
+            rel = self.ws.relpath(self.ws.resolve(a.path))
+            chunks = re.split(r"(?m)^(?=diff --git )", diff)
+            diff = "".join(c for c in chunks if c.split("\n", 1)[0].endswith(f" b/{rel}")
+                           or f" b/{rel}/" in c.split("\n", 1)[0])
+        return ToolOutcome("git_diff", diff or "(no changes)")
+
+    def _update_plan(self, a: PlanArgs) -> ToolOutcome:
+        items = [i.model_dump() for i in a.items]
+        done = sum(1 for i in items if i["status"] == "done")
+        return ToolOutcome("update_plan", f"Plan recorded ({done}/{len(items)} done).", plan=items)
 
 
 def format_command_result(res: CommandResult) -> str:
     if res.error:
         status = f"SANDBOX ERROR: {res.error}"
+    elif res.cancelled:
+        status = "CANCELLED by user (process tree killed; result unknown)"
     elif res.timed_out:
         status = "TIMED OUT (process tree killed)"
     else:

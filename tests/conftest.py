@@ -45,3 +45,24 @@ def env(settings):
     sandbox = LocalSandbox(settings.sandbox, dirs.workspace, dirs.checks)
     tools = ToolRegistry(ws, sandbox, settings.limits, settings.commands)
     return ws, dirs, sandbox, tools
+
+
+# ------------------------------------------------------------------ Stage 2 fixtures
+COUPON_TASK = ("Add coupon codes to the shop: Cart.apply_coupon(code) applies a percentage coupon "
+               "(SAVE10 = 10%, HALF = 50%) to the cart total after bulk discounts. Unknown codes raise "
+               "discounts.InvalidCoupon naming the code. Carts without a coupon keep their totals.")
+
+
+@pytest.fixture
+def feature_settings(settings):
+    """Sample shop with a feature that spans cart.py and discounts.py, and an edit-test-fix loop."""
+    settings.checks = [
+        CheckSpec("acceptance (feature)", f"{PY} {{checks}}/test_feature_coupon.py -q",
+                  expect_on_start="failed", expect_reason="apply_coupon"),
+        CheckSpec("regression", f"{PY} {{checks}}/baseline/tests -q"),
+    ]
+    settings.checks_dir = FIXTURES / "sample_feature_checks"
+    settings.limits.max_actions = 20
+    settings.limits.max_fix_rounds = 2
+    settings.acceptance_criteria = ["apply_coupon works after bulk discounts", "unknown codes raise InvalidCoupon"]
+    return settings

@@ -1,0 +1,14 @@
+# Allowed projects: only these can be selected with `harness start --project <name>`
+# and resumed later. Contains no secrets.
+sessions_dir: runs
+
+projects:
+  cosmic-feature:
+    config: examples/cosmic-feature/harness.yaml
+    description: "Stage 2 feature: Deallocate command (commands + domain model + service layer)"
+  cosmic-bugfix:
+    config: examples/cosmic/harness.yaml
+    description: "Stage 1 bug fix: validate ChangeBatchQuantity (handlers + domain model)"
+  cosmic-demo:
+    config: examples/cosmic-demo/harness.yaml
+    description: "Short live demo: InvalidBatchRef in the handler"

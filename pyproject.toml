@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coding-harness"
-version = "0.1.0"
-description = "Stage 1 coding-agent harness built on LangGraph"
+version = "0.2.0"
+description = "Stage 2 coding-agent harness built on LangGraph: navigation, bounded context, saved sessions"
 requires-python = ">=3.11"
 dependencies = [
     "langgraph>=1.0",
