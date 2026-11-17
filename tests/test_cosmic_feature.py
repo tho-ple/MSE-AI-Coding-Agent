@@ -12,7 +12,8 @@ import pytest
 
 from coding_harness.app import run_checks_only, run_task
 from coding_harness.config import load_settings
-from coding_harness.llm import ScriptedModel, ai, tool_call
+from coding_harness import demo
+from coding_harness.llm import ScriptedModel
 from tests.conftest import _force_remove
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,50 +35,8 @@ def settings(tmp_path):
     shutil.rmtree(s.runs_dir, onerror=_force_remove)
 
 
-def _edit(path, old, new):
-    return tool_call("edit_file", {"path": path, "old_text": old, "new_text": new})
-
-
-COMMANDS = "src/allocation/domain/commands.py"
-MODEL = "src/allocation/domain/model.py"
-HANDLERS = "src/allocation/service_layer/handlers.py"
-
-REFERENCE = [
-    ai(tool_call("find_symbol", {"name": "Allocate"}), tool_call("find_references", {"name": "COMMAND_HANDLERS"})),
-    ai(tool_call("module_deps", {"path": HANDLERS})),
-    ai(_edit(COMMANDS, "@dataclass\nclass CreateBatch(Command):",
-             "@dataclass\nclass Deallocate(Command):\n    orderid: str\n    sku: str\n    qty: int\n\n\n"
-             "@dataclass\nclass CreateBatch(Command):")),
-    ai(_edit(MODEL, "class Product:\n", "class NotAllocated(Exception):\n    pass\n\n\nclass Product:\n"),
-       _edit(MODEL, "    def change_batch_quantity(self, ref: str, qty: int):\n",
-             "    def deallocate(self, line: OrderLine) -> str:\n"
-             "        batch = next((b for b in self.batches if b.has(line)), None)\n"
-             "        if batch is None:\n"
-             "            raise NotAllocated(f\"Order {line.orderid} is not allocated for {line.sku}\")\n"
-             "        batch.deallocate(line)\n"
-             "        self.version_number += 1\n"
-             "        return batch.reference\n\n"
-             "    def change_batch_quantity(self, ref: str, qty: int):\n"),
-       # Bug in the first attempt: Batch.has / Batch.deallocate are missing.
-       ),
-    ai(_edit(HANDLERS, "def reallocate(\n",
-             "def deallocate(\n    cmd: commands.Deallocate,\n    uow: unit_of_work.AbstractUnitOfWork,\n):\n"
-             "    line = OrderLine(cmd.orderid, cmd.sku, cmd.qty)\n    with uow:\n"
-             "        product = uow.products.get(sku=line.sku)\n        if product is None:\n"
-             "            raise InvalidSku(f\"Invalid sku {line.sku}\")\n"
-             "        product.deallocate(line)\n        uow.commit()\n\n\ndef reallocate(\n"),
-       _edit(HANDLERS, "    commands.ChangeBatchQuantity: change_batch_quantity,\n",
-             "    commands.ChangeBatchQuantity: change_batch_quantity,\n    commands.Deallocate: deallocate,\n")),
-    ai(tool_call("finish", {"summary": "Deallocate command, domain method and handler added."})),
-    # -- fix round 1: acceptance fails with AttributeError 'Batch' object has no attribute 'has' --
-    ai(_edit(MODEL, "    def deallocate_one(self) -> OrderLine:\n",
-             "    def has(self, line: OrderLine) -> bool:\n        return line in self._allocations\n\n"
-             "    def deallocate(self, line: OrderLine):\n        if line in self._allocations:\n"
-             "            self._allocations.remove(line)\n\n"
-             "    def deallocate_one(self) -> OrderLine:\n")),
-    ai(tool_call("run_command", {"name": "unit_tests"})),
-    ai(tool_call("finish", {"summary": "Added Batch.has / Batch.deallocate."})),
-]
+COMMANDS, MODEL, HANDLERS = demo.COMMANDS, demo.MODEL, demo.HANDLERS
+REFERENCE = demo.REFERENCE_REPLIES  # the same reference solution `harness demo` replays
 
 
 def test_feature_check_fails_on_starting_commit_for_expected_reason(settings):
@@ -102,3 +61,27 @@ def test_reference_feature_with_one_fix_round(settings):
     assert all(v == "passed" for v in statuses.values()), statuses
     round0 = {c["name"]: c["status"] for c in s["check_history"][0]["checks"]}
     assert round0["acceptance (feature)"] == "failed"
+
+
+def test_demo_cancel_then_resume_continues_the_script(settings):
+    """`harness demo`: Ctrl+C mid-run, then `harness resume` with a NEW DemoModel continues at the right turn."""
+    from coding_harness.app import resume_session
+    from coding_harness.session import CancelToken
+
+    token = CancelToken()
+
+    class CancelAtTurn4(demo.DemoModel):
+        def invoke(self, messages):
+            reply = super().invoke(messages)
+            if sum(1 for m in messages if type(m).__name__ == "AIMessage") == 3:
+                token.set()  # user presses Ctrl+C while the 4th model request is running
+            return reply
+
+    first = run_task(settings, TASK, model=CancelAtTurn4(), run_id="demo-cancel", cancel=token)
+    assert first.status == "cancelled"
+    assert "Deallocate" in (first.dirs.workspace / COMMANDS).read_text()   # earlier edit saved
+    assert "NotAllocated" not in (first.dirs.workspace / MODEL).read_text()  # discarded reply never ran
+
+    result = resume_session(first.session.root, settings, model=demo.DemoModel())
+    assert result.status == "completed" and result.outcome == "success", result.state["checks"]
+    assert result.state["fix_round"] == 1

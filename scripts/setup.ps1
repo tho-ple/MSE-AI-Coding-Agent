@@ -67,9 +67,12 @@ Step "Harness virtualenv (.venv)"
 Ensure-Venv ".venv"
 Run .venv\Scripts\python.exe -m pip install -q -e ".[dev]"
 
-# NOTE: the target repository (targets/cosmicpython) is NOT set up here.
-# Clone it yourself when needed, e.g.:
-#   git clone https://github.com/cosmicpython/code targets/cosmicpython
+$Commit = "14c84797ffa77255d53cf1a02fe6aafda2b68aeb"
+Step "Target repository (git submodule targets\cosmicpython @ $($Commit.Substring(0, 7)))"
+Run git submodule update --init targets/cosmicpython
+$head = (& git -C targets/cosmicpython rev-parse HEAD).Trim()
+if ($head -ne $Commit) { throw "targets/cosmicpython is at $head, expected $Commit" }
+Write-Host "ok: $head"
 
 Step "Target test environment (targets\.venv-cosmic, used by the local sandbox backend)"
 Ensure-Venv "targets\.venv-cosmic"
@@ -142,8 +145,5 @@ if ($ModelReady) {
 }
 
 Write-Host "`nSetup complete. Try:" -ForegroundColor Green
-Write-Host "  .venv\Scripts\harness projects"
-Write-Host "  .venv\Scripts\harness baseline --project cosmic-feature"
+Write-Host "  .venv\Scripts\harness demo                      # no model needed: full run incl. one fix round"
 Write-Host "  .venv\Scripts\harness start --project cosmic-feature --task-file examples/cosmic-feature/task.md"
-Write-Host "  .venv\Scripts\harness baseline --config examples/cosmic-demo/harness.yaml"
-Write-Host "  .venv\Scripts\harness run --config examples/cosmic-demo/harness.yaml --task-file examples/cosmic-demo/task.md"

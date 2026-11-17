@@ -86,7 +86,7 @@ def _print_event(e: dict, verbose: bool) -> None:
     elif k == "fix_round":
         console.print(f"[bold yellow]fix round {e['round']}[/]: failed checks fed back to the model: {', '.join(e['failed'])}")
     elif k == "cancelled":
-        console.print(f"[bold yellow]cancelled[/] during {escape(e['during'])}")
+        console.print(f"[bold yellow]cancelled[/] {escape(e['during'])}")
     elif k == "paused":
         console.print("[bold yellow]Session paused - needs your decision:[/]")
         for p in e["problems"]:
@@ -217,6 +217,36 @@ def cmd_start(args) -> int:
     return _print_result(result, args.verbose)
 
 
+def cmd_demo(args) -> int:
+    """Model-free demo: the real harness on the feature project, driven by a pre-written reference model."""
+    from .demo import DEMO_PROJECT, DemoModel
+
+    reg = _registry(args)
+    if reg is None:
+        console.print("[red]No projects.yaml found.[/]")
+        return 2
+    try:
+        entry = reg.get(DEMO_PROJECT)
+    except KeyError as e:
+        console.print(f"[red]{escape(str(e))}[/]")
+        return 2
+    settings = load_settings(entry.config)
+    settings.runs_dir = reg.sessions_dir
+    overrides = {}
+    if args.sandbox:
+        settings.sandbox.backend = overrides["sandbox"] = args.sandbox
+    task = (entry.config.parent / "task.md").read_text(encoding="utf-8")
+    console.print(Panel.fit(
+        "[bold]Demo mode[/]: no LLM is called. A pre-written reference model drives the real harness\n"
+        "(tools, permissions, sandbox, checks, sessions). Its first attempt has a bug, so the edit-test-fix\n"
+        f"loop runs one fix round. {args.delay:g}s per model reply - press Ctrl+C to cancel, then\n"
+        "[bold]harness resume <id>[/] to continue from the saved checkpoint.", title="harness demo"))
+    result = start_session(settings, task, model=DemoModel(delay_s=args.delay),
+                           on_event=lambda e: _print_event(e, args.verbose), cancel=_cancel_on_ctrl_c(),
+                           project=entry.name, config_path=entry.config, overrides=overrides)
+    return _print_result(result, args.verbose)
+
+
 def cmd_run(args) -> int:
     settings = load_settings(args.config)
     overrides = {}
@@ -317,7 +347,14 @@ def cmd_resume(args) -> int:
     except (KeyError, FileNotFoundError) as e:
         console.print(f"[red]Cannot resume: {escape(str(e))}[/]")
         return 2
-    result = resume_session(d, settings, on_event=lambda e: _print_event(e, args.verbose), cancel=_cancel_on_ctrl_c(),
+    model = None
+    from .demo import DEMO_MODEL_LABEL, DemoModel
+
+    if session.data.get("model") == DEMO_MODEL_LABEL:  # a `harness demo` session continues with the demo model
+        console.print("[cyan]demo session: continuing with the pre-written demo model (no LLM)[/]")
+        model = DemoModel(delay_s=1.0)
+    result = resume_session(d, settings, model=model, on_event=lambda e: _print_event(e, args.verbose),
+                            cancel=_cancel_on_ctrl_c(),
                             skip_uncertain=args.skip_uncertain, accept_workspace=args.accept_workspace)
     if result.pause_reason and ("nothing to resume" in result.pause_reason or "still being run" in result.pause_reason):
         console.print(f"[yellow]{escape(result.pause_reason)}[/]")
@@ -491,6 +528,12 @@ def main(argv: list[str] | None = None) -> int:
     bi.add_argument("--config", required=True)
     bi.set_defaults(fn=cmd_build_image)
 
+    dm = sub.add_parser("demo", help="model-free demo of the feature task (pre-written replies, real harness)")
+    dm.add_argument("--delay", type=float, default=1.0, help="seconds per model reply (time to press Ctrl+C)")
+    dm.add_argument("--sandbox", choices=["docker", "local"], help="override sandbox.backend from the config")
+    dm.add_argument("-v", "--verbose", action="store_true")
+    dm.set_defaults(fn=cmd_demo)
+
     mc = sub.add_parser("model-check", help="check that the configured model answers and makes tool calls")
     mc.add_argument("--project", default="cosmic-feature")
     mc.add_argument("--config")
@@ -500,7 +543,11 @@ def main(argv: list[str] | None = None) -> int:
     g.set_defaults(fn=cmd_graph)
 
     args = p.parse_args(argv)
-    return args.fn(args)
+    try:
+        return args.fn(args)
+    except FileNotFoundError as e:  # missing target repository / config: a message, not a traceback
+        console.print(f"[red]error:[/] {escape(str(e))}")
+        return 2
 
 
 if __name__ == "__main__":

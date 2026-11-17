@@ -127,7 +127,7 @@ class Harness:
     def _check_cancel(self, where: str) -> None:
         if self.cancel is not None and self.cancel.is_set():
             self.emit("cancelled", during=where)
-            raise Cancelled(f"cancelled by user during {where}")
+            raise Cancelled(f"cancelled by user {where}")
 
     def _ctx(self) -> ContextManager:
         if self.context is None:
@@ -136,7 +136,7 @@ class Harness:
 
     # ------------------------------------------------------------------ nodes
     def agent(self, state: HarnessState) -> dict:
-        self._check_cancel("model request")
+        self._check_cancel("before the model request")
         lim = self.settings.limits
         view, stats = self._ctx().view(state["messages"])
         self.emit("context", **stats.as_dict())
@@ -187,7 +187,7 @@ class Harness:
         while t.is_alive():
             t.join(0.1)
             if t.is_alive() and self.cancel.is_set():
-                self.emit("cancelled", during="model request")
+                self.emit("cancelled", during="during the model request")
                 raise Cancelled("cancelled by user during model request (reply will be discarded)")
         if "error" in box:
             raise box["error"]
@@ -226,7 +226,7 @@ class Harness:
             elif self.recorder.is_uncertain(call["id"]):
                 raise Paused(f"uncertain interrupted action {call['name']} ({call['id']}) - not replayed")
             else:
-                self._check_cancel(f"before {call['name']}")
+                self._check_cancel(f"before {call['name']} (not started)")
                 n = actions + 1
                 self.recorder.action_start(call, n)
                 outcome = self.tools.call(call["name"], call["args"], cancel=self.cancel)
@@ -251,14 +251,14 @@ class Harness:
             content = outcome.content if trusted else wrap_untrusted(f"{call['name']} result", outcome.content)
             out.append(ToolMessage(content, tool_call_id=call["id"], status="error" if (outcome.denied or outcome.error) else "success"))
             if outcome.cancelled and fresh:
-                self.emit("cancelled", during=f"{call['name']} (process tree killed)")
+                self.emit("cancelled", during=f"during {call['name']} (process tree killed)")
                 raise Cancelled(f"cancelled by user during {call['name']}")
 
         return {"messages": out, "actions": actions, "denied": denied, "finished": finished,
                 "summary": summary, "stop_reason": stop, "plan": plan, "last_node": "act"}
 
     def verify(self, state: HarnessState) -> dict:
-        self._check_cancel("final checks")
+        self._check_cancel("before the final checks")
         if state.get("stop_reason"):
             self.emit("stopped", reason=state["stop_reason"])
         lim = self.settings.limits
@@ -266,7 +266,7 @@ class Harness:
                       if not line.startswith("D") and line.endswith(".py")]
         results = []
         for check in self.settings.checks:
-            self._check_cancel(f"check {check.name}")
+            self._check_cancel(f"during check {check.name}")
             timeout = check.timeout_s or lim.command_timeout_s
             template = check.command
             if "{changed_py}" in template:
@@ -285,7 +285,7 @@ class Harness:
             if check.probe:
                 pr = self.sandbox.run(self.sandbox.render(check.probe), timeout, cancel=self.cancel)
                 if pr.cancelled:
-                    self._check_cancel(f"check {check.name}")
+                    self._check_cancel(f"during check {check.name}")
                 if not pr.ok:
                     out, cut = truncate(f"probe failed ({check.probe}):\n{pr.error or pr.output}", lim.max_output_chars)
                     r = {"name": check.name, "type": check.kind, "command": cmd, "status": "unavailable",
@@ -295,7 +295,7 @@ class Harness:
                     continue
             res = self.sandbox.run(cmd, timeout, cancel=self.cancel)
             if res.cancelled:
-                self.emit("cancelled", during=f"check {check.name}")
+                self.emit("cancelled", during=f"during check {check.name}")
                 raise Cancelled(f"cancelled by user during check {check.name}")
             if res.error:
                 status = "unavailable"

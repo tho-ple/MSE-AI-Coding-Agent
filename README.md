@@ -9,6 +9,67 @@ failed or unavailable check is never reported as passed.
 
 Stage 1 behaviour (tools, permissions, limits, bug-fix workflow) is unchanged and its tests still pass.
 
+## Quick test (for reviewers, ~10 minutes)
+
+You need Python 3.11+, git and Docker Desktop (running). Steps 1–3 need **no model, no API key and
+no network** (beyond the installs). Step 4 uses the FH model (API key + FH network/VPN).
+
+**0. Install** (first run ~5 min: virtualenvs, sandbox image, self-test)
+
+```powershell
+git clone --recurse-submodules https://github.com/tho-ple/MSE-AI-Coding-Agent.git
+cd MSE-AI-Coding-Agent
+Set-ExecutionPolicy -Scope Process Bypass   # Windows: allow the .ps1 scripts in this window only
+scripts\setup.ps1                     # macOS / Linux: sh scripts/setup.sh
+.venv\Scripts\Activate.ps1            # macOS / Linux: . .venv/bin/activate   -> `harness` is on PATH
+```
+
+No Docker? Use `scripts\setup.ps1 -SkipDocker` and add `--sandbox local` to `baseline`, `demo` and `start`
+(runs on the host, not isolated).
+
+**1. Automated tests** — all Stage 1 + Stage 2 requirements, with pre-written model replies:
+
+```powershell
+python -m pytest            # expected: all passed (container tests skip only without Docker)
+```
+
+**2. The feature check fails on the starting code** (for the expected reason):
+
+```powershell
+harness baseline --project cosmic-feature
+#   acceptance (feature): expectation met: status failed ... /has no attribute 'Deallocate'/ found
+```
+
+**3. Model-free demo of the full loop** — the real harness (tools, permissions, Docker sandbox,
+checks, sessions) driven by a pre-written reference "model" whose first attempt has a bug:
+
+```powershell
+harness demo                # navigation -> edits in 3 modules -> finish -> acceptance FAILED
+                            # -> fix round 1 -> all 6 checks PASSED -> outcome SUCCESS
+```
+
+Cancel and resume: run `harness demo` again and press **Ctrl+C** while it says `... asking model`
+(1 s per reply), or run `harness cancel <id>` from a second terminal. Then:
+
+```powershell
+harness sessions            # the cancelled session
+harness status  <id>        # progress, limits, plan, last steps (id prefix is enough)
+harness resume  <id>        # rechecks permissions + working copy, continues from the checkpoint
+harness review  <id>        # changed files, final diff, check results, unfinished work
+```
+
+**4. The real feature run with the FH model** (key from the FH LLM pilot, VPN connected):
+
+```powershell
+notepad .env                # OPENAI_API_KEY=<your key>  (the other settings were written by setup)
+harness model-check         # OK tool call ok: add(...)
+harness start --project cosmic-feature --task-file examples/cosmic-feature/task.md
+harness review <id>
+```
+
+Our recorded run: success, 28 actions, ~75 s, no manual help ([details](#demo-run-with-a-real-model)).
+Local alternative without a key: `scripts\setup.ps1 -Provider local` (Ollama; slow on CPU).
+
 ## Setup
 
 Requirements: Python 3.11+, git, a model (the FH endpoint with an API key, or local [Ollama](https://ollama.com)), and a container engine for the
@@ -16,12 +77,15 @@ contained sandbox: Docker or Podman, installed natively or inside WSL (found aut
 Without one, add `--sandbox local` to the commands below (not an isolation boundary, see below).
 
 ```powershell
-git clone <this-repo-url>; cd <repo>
-git clone https://github.com/cosmicpython/code targets/cosmicpython      # the target repository
-git -C targets/cosmicpython checkout 14c84797ffa77255d53cf1a02fe6aafda2b68aeb
+git clone --recurse-submodules https://github.com/tho-ple/MSE-AI-Coding-Agent.git; cd MSE-AI-Coding-Agent
 scripts\setup.ps1                  # FH model (default). Then put your key into .env
 scripts\setup.ps1 -Provider local  # or: local Ollama (-Model qwen2.5-coder:7b); -SkipDocker without a container engine
 ```
+
+On macOS / Linux use `sh scripts/setup.sh` (`PROVIDER=local`, `MODEL=...`, `SKIP_DOCKER=1` as
+environment variables). The target repository [cosmicpython/code](https://github.com/cosmicpython/code)
+is a git submodule pinned to the starting commit `14c8479`; the setup script runs
+`git submodule update --init` and verifies the commit, so a plain `git clone` works too.
 
 `setup.ps1` (idempotent) creates `.venv` with the harness (`pip install -e ".[dev]"`), the target test
 environment `targets/.venv-cosmic` (incl. `pyflakes` for the lint check), builds the sandbox image
@@ -71,6 +135,7 @@ $h = ".venv\Scripts\harness"
 & $h resume  <id> [--skip-uncertain] [--accept-workspace]
 & $h review  <id> [--full-output]                        # changed files, final diff, checks, unfinished work
 & $h run --config examples/cosmic/harness.yaml --task-file examples/cosmic/task.md   # Stage 1 style
+& $h demo [--delay 1]                                    # model-free demo of the feature (pre-written replies)
 & $h model-check                                         # configured model reachable and making tool calls
 & $h graph                                               # the controller graph as Mermaid
 .venv\Scripts\python -m pytest                           # all tests, no model / network / API key
@@ -90,7 +155,7 @@ flowchart LR
     App --> G["graph.py<br/>Harness (LangGraph controller)"]
     G --> CTX["context.py<br/>ContextManager: brief, repo map,<br/>file selection, history compaction"]
     G --> TR["tools.py<br/>ToolRegistry: schemas,<br/>validation, execution"]
-    G --> LLM["llm.py<br/>ChatOllama | ScriptedModel"]
+    G --> LLM["llm.py<br/>ChatOllama | ChatOpenAI |<br/>ScriptedModel | demo.DemoModel"]
     G -. Recorder .-> SES
     TR --> NAV["navigation.py<br/>RepoIndex (ast): symbols,<br/>references, deps; git state"]
     CTX --> NAV
@@ -100,12 +165,13 @@ flowchart LR
 
 | Part | Where | What it does |
 |---|---|---|
-| Interface | `cli.py` | projects / start / sessions / status / cancel / resume / review / baseline. No logic: it calls `app.py` |
+| Interface | `cli.py` | projects / start / demo / sessions / status / cancel / resume / review / baseline / model-check. No logic: it calls `app.py` |
 | Core | `app.py` | `start_session`, `resume_session` (+ `validate_resume`), `cancel_session`, `session_review`, `run_checks_only` |
 | Controller | `graph.py` | LangGraph state machine; resume router; edit–test–fix loop; checkpoint after every node |
 | Navigation | `navigation.py`, tools `repo_map`, `find_symbol`, `find_references`, `module_deps`, `git_status`, `git_diff` | `ast`-based index of the copy (rebuilt for changed files) |
 | Context | `context.py` | trusted task brief, ranked file selection + repo map + excerpts, size-limited history |
 | Sessions | `session.py` | `session.json` (task record + checkpoint), `steps.jsonl` (write-ahead journal), cancel flag, lock |
+| Model | `llm.py`, `demo.py` | `make_model`: Ollama or any OpenAI-compatible API (FH endpoint); `ScriptedModel` for tests; `DemoModel` for `harness demo`; `check_model` for `harness model-check` |
 | Repository tools | `tools.py`, `workspace.py` | `list_files`, `read_file`, `search`, `edit_file`, `write_file`, `update_plan` inside the copy only |
 | Execution | `sandbox.py`, `run_command` | configured commands only; timeout **and cancel** kill the whole process tree / container |
 | Verification | `graph.verify/fix/report` | test, lint and build checks; outcome derived from checks, never from the model |
@@ -287,7 +353,8 @@ are skipped without an engine and image.
 | Checks and loop | `tests/test_fix_loop.py` — failed check fed back and fixed, rounds exhausted, no progress, unavailable / skipped never pass |
 | CLI | `tests/test_cli.py` |
 | Model provider | `tests/test_model_provider.py` — provider switch via env, `.env` loading, missing key, API key never in the sandbox environment, model check |
-| Feature (Cosmic) | `tests/test_cosmic_feature.py` — fails on the starting commit for the expected reason; scripted reference change across 3 modules with one fix round → all checks pass |
+| Feature (Cosmic) | `tests/test_cosmic_feature.py` — fails on the starting commit for the expected reason; scripted reference change across 3 modules with one fix round → all checks pass; demo cancelled mid-run and resumed with a new model instance → success |
+| Demo model | `tests/test_demo.py` — reply chosen from the conversation (so resume continues correctly), script end is an error |
 | Stage 1 (unchanged) | `test_file_tools`, `test_controller`, `test_invalid_request`, `test_failed_command`, `test_limits`, `test_bugfix`, `test_sandbox`, `test_container`, `test_cosmic_e2e` |
 
 ## Configuration reference

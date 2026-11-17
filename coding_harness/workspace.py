@@ -62,8 +62,16 @@ class Workspace:
             shutil.rmtree(root)
         dirs = RunDirs(root=root, workspace=root / "workspace", checks=root / "checks")
         src = settings.target.repo.resolve()
+        if not src.is_dir() or not any(src.iterdir()):
+            raise FileNotFoundError(
+                f"target repository {src} is missing or empty. For the Cosmic Python examples run: "
+                "git submodule update --init   (or scripts/setup.ps1 / scripts/setup.sh)")
+        if settings.target.commit and not (src / ".git").exists():
+            raise FileNotFoundError(
+                f"target {src} is not a git checkout, so the starting commit {settings.target.commit[:12]} "
+                "cannot be exported exactly. Run: git submodule update --init")
 
-        if settings.target.commit and (src / ".git").exists():
+        if settings.target.commit:
             # Export exactly the recorded starting commit, not whatever is in the working tree.
             dirs.workspace.mkdir(parents=True)
             archive = root / "start.tar"
