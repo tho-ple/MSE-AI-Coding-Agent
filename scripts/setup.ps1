@@ -18,11 +18,20 @@ $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
-function Run {
+# Runs a native command and returns its exit code. Success is judged by the exit code only:
+# Windows PowerShell 5.1 would otherwise turn harmless stderr output (e.g. pip notices) into a
+# terminating error when the script's output is redirected.
+function Invoke-Native {
     $exe = $args[0]
     $rest = @($args | Select-Object -Skip 1)
-    & $exe @rest
-    if ($LASTEXITCODE -ne 0) { throw "command failed ($LASTEXITCODE): $($args -join ' ')" }
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & $exe @rest 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { "$($_.TargetObject)" } else { "$_" } } | Out-Host } finally { $ErrorActionPreference = $old }
+    return $LASTEXITCODE
+}
+function Run {
+    $code = Invoke-Native @args
+    if ($code -ne 0) { throw "command failed ($code): $($args -join ' ')" }
 }
 
 # Returns the full path of a working Python >= 3.11 (skips the Microsoft Store stub).
@@ -70,7 +79,7 @@ Run .venv\Scripts\python.exe -m pip install -q -e ".[dev]"
 $Commit = "14c84797ffa77255d53cf1a02fe6aafda2b68aeb"
 Step "Target repository (git submodule targets\cosmicpython @ $($Commit.Substring(0, 7)))"
 Run git submodule update --init targets/cosmicpython
-$head = (& git -C targets/cosmicpython rev-parse HEAD).Trim()
+$head = "$(git -C targets/cosmicpython rev-parse HEAD)".Trim()
 if ($head -ne $Commit) { throw "targets/cosmicpython is at $head, expected $Commit" }
 Write-Host "ok: $head"
 
@@ -82,8 +91,8 @@ Step "Sandbox image (container engine: docker, podman, or either one inside WSL)
 if ($SkipDocker) {
     Write-Host "skipped (-SkipDocker)"
 } else {
-    & .venv\Scripts\harness.exe build-image --config examples/cosmic/harness.yaml
-    if ($LASTEXITCODE -ne 0) {
+    $code = Invoke-Native .venv\Scripts\harness.exe build-image --config examples/cosmic-feature/harness.yaml
+    if ($code -ne 0) {
         Write-Warning "no container engine / image build failed - only the local (non-isolated) backend is available. Use --sandbox local."
     }
 }
@@ -138,8 +147,8 @@ Run .venv\Scripts\python.exe -m pytest -q
 
 Step "Model check (one tool call)"
 if ($ModelReady) {
-    & .venv\Scripts\harness.exe model-check
-    if ($LASTEXITCODE -ne 0) { Write-Warning "model check failed - see above (FH: VPN connected? key valid?  local: ollama running?)" }
+    $code = Invoke-Native .venv\Scripts\harness.exe model-check
+    if ($code -ne 0) { Write-Warning "model check failed - see above (FH: VPN connected? key valid?  local: ollama running?)" }
 } else {
     Write-Host "skipped (model not ready yet, see warning above)"
 }
