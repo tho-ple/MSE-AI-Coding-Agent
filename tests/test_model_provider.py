@@ -66,3 +66,13 @@ def test_api_key_is_not_passed_to_local_sandbox(tmp_path, monkeypatch):
     env = sb._env(str(tmp_path))
     assert "OPENAI_API_KEY" not in env
     assert "sk-secret-value" not in env.values()
+
+
+def test_model_check_needs_a_tool_call():
+    from coding_harness.llm import ScriptedModel, ai, check_model, tool_call
+
+    assert check_model(ScriptedModel([ai(tool_call("add", {"a": 2, "b": 3}))]))[0] is True
+    ok, detail = check_model(ScriptedModel([ai(content="5")]))
+    assert not ok and "without the expected tool call" in detail
+    ok, detail = check_model(ScriptedModel([ConnectionError("unreachable")]))
+    assert not ok and "ConnectionError" in detail

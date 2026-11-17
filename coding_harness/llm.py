@@ -89,3 +89,27 @@ def make_model(settings: ModelSettings, tools: list[dict]) -> ChatModel:
                           temperature=settings.temperature, timeout=settings.request_timeout_s, max_retries=2)
         return LangChainModel(chat, tools)
     raise ValueError(f"unknown model provider {settings.provider!r} (supported: ollama, openai)")
+
+
+def check_model(model: ChatModel) -> tuple[bool, str]:
+    """Ask the model for one trivial tool call. Used by ``harness model-check`` and the setup script.
+
+    Returns (ok, detail). ``ok`` means the endpoint answered AND produced a valid tool call,
+    which the controller depends on.
+    """
+    from langchain_core.messages import HumanMessage
+
+    try:
+        reply = model.invoke([HumanMessage("Call the add tool with a=2 and b=3. Do not answer in text.")])
+    except Exception as e:  # connection, auth, unknown model, ...
+        return False, f"request failed: {type(e).__name__}: {str(e)[:300]}"
+    calls = [c for c in reply.tool_calls if c.get("name") == "add"]
+    if not calls:
+        return False, f"model answered without the expected tool call: {str(reply.content)[:200]!r}"
+    return True, f"tool call ok: add({calls[0].get('args')})"
+
+
+CHECK_TOOLS = [{"type": "function", "function": {
+    "name": "add", "description": "Add two integers.",
+    "parameters": {"type": "object", "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+                   "required": ["a", "b"]}}}]

@@ -19,12 +19,16 @@ Without one, add `--sandbox local` to the commands below (not an isolation bound
 git clone <this-repo-url>; cd <repo>
 git clone https://github.com/cosmicpython/code targets/cosmicpython      # the target repository
 git -C targets/cosmicpython checkout 14c84797ffa77255d53cf1a02fe6aafda2b68aeb
-scripts\setup.ps1                  # -SkipDocker, -Model qwen2.5-coder:7b
+scripts\setup.ps1                  # FH model (default). Then put your key into .env
+scripts\setup.ps1 -Provider local  # or: local Ollama (-Model qwen2.5-coder:7b); -SkipDocker without a container engine
 ```
 
 `setup.ps1` (idempotent) creates `.venv` with the harness (`pip install -e ".[dev]"`), the target test
 environment `targets/.venv-cosmic` (incl. `pyflakes` for the lint check), builds the sandbox image
-`coding-harness-cosmic` (`harness build-image`), pulls the model and runs the test suite.
+`coding-harness-cosmic` (`harness build-image`), configures the model in `.env`, runs the test suite and
+finally `harness model-check` (one real tool call). With `-Provider fh` it writes the FH endpoint and
+model and keeps an existing key; with `-Provider local` it writes the Ollama settings and pulls the
+model. Re-run it with the other `-Provider` to switch.
 If you built the image before Stage 2, rebuild it (`harness build-image --config examples/cosmic-feature/harness.yaml`)
 so it contains `pyflakes`; otherwise the lint check is reported as **unavailable** (never as passed).
 
@@ -42,8 +46,12 @@ loaded by the CLI, existing environment variables win) switches all projects to 
 | context window | set by the server | `num_ctx: 32768` (feature), 16384 (Stage 1) | config `model.num_ctx` |
 
 ```powershell
-copy .env.example .env      # then put your own key into OPENAI_API_KEY
+copy .env.example .env      # manual alternative to setup.ps1; then put your own key into OPENAI_API_KEY
+.venv\Scripts\harness model-check    # answers + makes a tool call? (FH: needs the FH network / VPN)
 ```
+
+The FH endpoint is reachable only from the FH network or VPN; outside it the host name does not
+resolve and `model-check` reports the connection error.
 
 The key is read only by the model client. It is never written to a session file, a log or the
 config, and never reaches executed code: the local sandbox gets an allow-listed environment and the
@@ -63,6 +71,7 @@ $h = ".venv\Scripts\harness"
 & $h resume  <id> [--skip-uncertain] [--accept-workspace]
 & $h review  <id> [--full-output]                        # changed files, final diff, checks, unfinished work
 & $h run --config examples/cosmic/harness.yaml --task-file examples/cosmic/task.md   # Stage 1 style
+& $h model-check                                         # configured model reachable and making tool calls
 & $h graph                                               # the controller graph as Mermaid
 .venv\Scripts\python -m pytest                           # all tests, no model / network / API key
 ```
@@ -277,6 +286,7 @@ are skipped without an engine and image.
 | Safe resume | `tests/test_resume.py` — harness edits kept, counters + limits preserved, workspace mismatch, crash mid-edit → uncertain → never replayed, permission change, project no longer allowed, live/completed sessions |
 | Checks and loop | `tests/test_fix_loop.py` — failed check fed back and fixed, rounds exhausted, no progress, unavailable / skipped never pass |
 | CLI | `tests/test_cli.py` |
+| Model provider | `tests/test_model_provider.py` — provider switch via env, `.env` loading, missing key, API key never in the sandbox environment, model check |
 | Feature (Cosmic) | `tests/test_cosmic_feature.py` — fails on the starting commit for the expected reason; scripted reference change across 3 modules with one fix round → all checks pass |
 | Stage 1 (unchanged) | `test_file_tools`, `test_controller`, `test_invalid_request`, `test_failed_command`, `test_limits`, `test_bugfix`, `test_sandbox`, `test_container`, `test_cosmic_e2e` |
 
@@ -294,8 +304,10 @@ Project config (`examples/*/harness.yaml`): `model`, `target` (repo, commit, wri
 * Navigation is Python-only (other files are listed, not parsed); references are name-based (no type
   inference), so same-named symbols in different classes are all reported.
 * The token budget is estimated from characters, not counted with the model's tokenizer.
-* A cancelled model request is abandoned, not aborted: the HTTP request may keep Ollama busy until it
-  finishes; its reply is discarded.
+* A cancelled model request is abandoned, not aborted: the HTTP request may keep the model server busy
+  until it finishes; its reply is discarded.
+* The FH endpoint is a best-effort pilot service (shared GPU, FH network/VPN only); local Ollama on CPU
+  works but is far too slow for the feature task (see below).
 * If the process dies between a tool's effect and its journal record, the action is *uncertain* by
   design and needs a user decision; the harness cannot tell whether it took effect (the fingerprint
   diff shows what changed).
@@ -306,13 +318,23 @@ Project config (`examples/*/harness.yaml`): `model`, `target` (repo, commit, wri
 
 ## Demo run with a real model
 
-_Fill in after recording:_ model and version, session id, outcome, fix rounds, and any manual help.
+| | |
+|---|---|
+| Model | `Qwen/Qwen3.6-35B-A3B` via the FH endpoint (provider `openai`, temperature 0) |
+| Session | `cosmic-feature-20261117-150718-92e7` (2026-11-17), Docker sandbox, resource limits on |
+| Command | `harness start --project cosmic-feature --task-file examples/cosmic-feature/task.md` |
+| Outcome | **success** — model called `finish`; all 6 harness checks passed (acceptance, 3 × regression, lint, build) |
+| Effort | 28 actions (11 `read_file`, 8 `edit_file`, 6 `update_plan`, 1 `run_command unit_tests` → 24 passed, 1 `git_diff`, `finish`), 0 denied, 0 retries, 0 fix rounds, ~75 s |
+| Change | `domain/commands.py` +7, `domain/model.py` +12 (`NotAllocated`, `Product.deallocate`, `Batch` helper), `service_layer/handlers.py` +14 (handler + `COMMAND_HANDLERS`), `tests/unit/test_handlers.py` +33/−1 (3 new tests) |
+| Manual help | none during the run. The task text, allowed changes and acceptance checks were written beforehand (see above); the files to change were not named |
 
-Note from development: on a machine where Ollama runs `qwen2.5-coder:14b` on **CPU only**, one request
-with the ~20k-character first context took more than 15 minutes. That run was stopped with
-`harness cancel <id>` from a second terminal (a real check of cancelling a live model request: the
-session was saved as `cancelled` and can be resumed). Use a GPU, or a smaller model (`HARNESS_MODEL=qwen2.5-coder:7b`)
-and a smaller `context.max_chars`, for the recorded feature run.
+The model found the modules from the selected context (handlers, model, commands were ranked top 3)
+and succeeded on the first attempt, so the fix loop was not needed here; failed-check recovery is
+verified with scripted replies (`tests/test_fix_loop.py`, `tests/test_cosmic_feature.py`).
+
+Earlier attempts on local Ollama (`qwen2.5-coder:14b`, `qwen3:30b-a3b`) on a CPU-only machine took more than 15
+minutes per request; one was stopped with `harness cancel <id>` from a second terminal (a real
+cancellation of a live model request: saved as `cancelled`, resumable).
 
 ## Credits
 
@@ -320,5 +342,5 @@ and a smaller `context.max_chars`, for the recorded feature run.
   Gregory ([cosmicpython/code](https://github.com/cosmicpython/code), MIT-style license in `targets/`).
 * Libraries: LangGraph, LangChain Core, langchain-ollama, langchain-openai, pydantic, rich, psutil, PyYAML, pytest, pyflakes.
 * The Stage 1 harness is my own code from Delivery 1; Stage 2 extends it.
-* AI help: the Stage 2 extension (navigation, context, sessions, resume, fix loop, CLI, tests, README)
+* AI help: the Stage 2 extension (navigation, context, sessions, resume, fix loop, CLI, model providers, setup, tests, README)
   was written with the help of Claude Code (Anthropic, Claude Opus); I reviewed, ran and adjusted it.

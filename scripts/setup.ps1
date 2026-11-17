@@ -1,11 +1,17 @@
 # One-shot, idempotent setup for the coding harness (Windows / PowerShell).
 #
-#   scripts\setup.ps1                 # everything
-#   scripts\setup.ps1 -SkipDocker     # no sandbox image (local backend only)
-#   scripts\setup.ps1 -Model qwen2.5-coder:7b
+#   scripts\setup.ps1                          # everything, FH endpoint model (needs API key + FH network/VPN)
+#   scripts\setup.ps1 -Provider local          # everything, local Ollama model instead
+#   scripts\setup.ps1 -Provider local -Model qwen2.5-coder:7b
+#   scripts\setup.ps1 -SkipDocker              # no sandbox image (local backend only)
+#
+# The provider choice is written to .env (git-ignored). Re-run with the other -Provider to switch;
+# an API key already in .env is kept.
 param(
-    [switch]$SkipDocker,
-    [string]$Model = "qwen2.5-coder:14b"
+    [ValidateSet("fh", "local")]
+    [string]$Provider = "fh",
+    [string]$Model = "",
+    [switch]$SkipDocker
 )
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
@@ -79,15 +85,61 @@ if ($SkipDocker) {
     }
 }
 
-Step "Model (Ollama)"
-if (Get-Command ollama -ErrorAction SilentlyContinue) {
-    Run ollama pull $Model
+# Writes KEY=VALUE into .env (replacing an existing line, or appending). Never prints values.
+function Set-EnvLine([string]$Key, [string]$Value) {
+    $lines = @()
+    if (Test-Path ".env") { $lines = @(Get-Content ".env" -Encoding utf8) }
+    $found = $false
+    $lines = @($lines | ForEach-Object {
+        if ($_ -match "^\s*$([regex]::Escape($Key))\s*=") { $found = $true; "$Key=$Value" } else { $_ }
+    })
+    if (-not $found) { $lines += "$Key=$Value" }
+    [IO.File]::WriteAllLines((Join-Path $Root ".env"), [string[]]$lines)
+}
+function Get-EnvLine([string]$Key) {
+    if (-not (Test-Path ".env")) { return "" }
+    $m = Select-String -Path ".env" -Pattern "^\s*$([regex]::Escape($Key))\s*=(.*)$" | Select-Object -First 1
+    if ($m) { return $m.Matches[0].Groups[1].Value.Trim().Trim('"', "'") } else { return "" }
+}
+
+$ModelReady = $true
+if ($Provider -eq "fh") {
+    Step "Model: FH endpoint (OpenAI-compatible)"
+    if (-not $Model) { $Model = "Qwen/Qwen3.6-35B-A3B" }
+    Set-EnvLine "HARNESS_PROVIDER" "openai"
+    Set-EnvLine "HARNESS_MODEL" $Model
+    Set-EnvLine "OPENAI_BASE_URL" "YOUR_ENDPOINT_URL"
+    $key = Get-EnvLine "OPENAI_API_KEY"
+    if (-not $key -or $key -eq "YOUR_API_KEY") {
+        Set-EnvLine "OPENAI_API_KEY" ""
+        $ModelReady = $false
+        Write-Warning "Put your FH API key into .env (OPENAI_API_KEY=...), then run: .venv\Scripts\harness model-check"
+    }
+    Write-Host "provider openai, model $Model (.env). The endpoint is reachable only from the FH network / VPN."
 } else {
-    Write-Warning "ollama not found - install it from https://ollama.com, then run: ollama pull $Model"
+    Step "Model: local Ollama"
+    if (-not $Model) { $Model = "qwen2.5-coder:14b" }
+    Set-EnvLine "HARNESS_PROVIDER" "ollama"
+    Set-EnvLine "HARNESS_MODEL" $Model
+    Set-EnvLine "OLLAMA_HOST" "http://localhost:11434"
+    if (Get-Command ollama -ErrorAction SilentlyContinue) {
+        Run ollama pull $Model
+    } else {
+        $ModelReady = $false
+        Write-Warning "ollama not found - install it from https://ollama.com, then run: ollama pull $Model"
+    }
 }
 
 Step "Self-test (no model needed)"
 Run .venv\Scripts\python.exe -m pytest -q
+
+Step "Model check (one tool call)"
+if ($ModelReady) {
+    & .venv\Scripts\harness.exe model-check
+    if ($LASTEXITCODE -ne 0) { Write-Warning "model check failed - see above (FH: VPN connected? key valid?  local: ollama running?)" }
+} else {
+    Write-Host "skipped (model not ready yet, see warning above)"
+}
 
 Write-Host "`nSetup complete. Try:" -ForegroundColor Green
 Write-Host "  .venv\Scripts\harness projects"

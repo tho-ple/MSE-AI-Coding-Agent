@@ -398,6 +398,32 @@ def cmd_build_image(args) -> int:
     return sandbox.build_image(settings.sandbox.dockerfile)
 
 
+def cmd_model_check(args) -> int:
+    """Check that the configured model answers and makes tool calls (provider from .env / config)."""
+    import time
+
+    from .llm import CHECK_TOOLS, check_model, make_model
+
+    reg = _registry(args)
+    if args.config:
+        settings = load_settings(args.config)
+    elif reg is not None:
+        settings = load_settings(reg.get(args.project).config)
+    else:
+        console.print("[red]no projects file; pass --config[/red]")
+        return 2
+    m = settings.model
+    console.print(f"model {m.provider}:{m.name} at {m.base_url or '(no URL)'}")
+    t = time.monotonic()
+    try:
+        ok, detail = check_model(make_model(m, CHECK_TOOLS))
+    except ValueError as e:  # e.g. missing API key
+        ok, detail = False, str(e)
+    colour = "green" if ok else "red"
+    console.print(f"[{colour}]{'OK' if ok else 'FAILED'}[/{colour}] {escape(detail)} ({time.monotonic() - t:.1f}s)")
+    return 0 if ok else 1
+
+
 def cmd_graph(args) -> int:
     """Print the compiled LangGraph controller as Mermaid (paste into mermaid.live)."""
     from .graph import Harness
@@ -464,6 +490,11 @@ def main(argv: list[str] | None = None) -> int:
     bi = sub.add_parser("build-image", help="build the sandbox image (docker/podman, native or in WSL)")
     bi.add_argument("--config", required=True)
     bi.set_defaults(fn=cmd_build_image)
+
+    mc = sub.add_parser("model-check", help="check that the configured model answers and makes tool calls")
+    mc.add_argument("--project", default="cosmic-feature")
+    mc.add_argument("--config")
+    mc.set_defaults(fn=cmd_model_check)
 
     g = sub.add_parser("graph", help="print the LangGraph controller as Mermaid")
     g.set_defaults(fn=cmd_graph)
