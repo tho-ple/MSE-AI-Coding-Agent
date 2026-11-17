@@ -74,4 +74,18 @@ def make_model(settings: ModelSettings, tools: list[dict]) -> ChatModel:
         chat = ChatOllama(model=settings.name, base_url=settings.base_url,
                           temperature=settings.temperature, num_ctx=settings.num_ctx)
         return LangChainModel(chat, tools)
-    raise ValueError(f"unknown model provider {settings.provider!r} (supported: ollama)")
+    if settings.provider == "openai":
+        import os
+
+        from langchain_openai import ChatOpenAI
+
+        key = os.environ.get(settings.api_key_env)
+        if not key:
+            raise ValueError(f"model provider 'openai' needs the API key in env {settings.api_key_env} "
+                             "(put it in the git-ignored .env file)")
+        if not settings.base_url:
+            raise ValueError("model provider 'openai' needs a base URL (env OPENAI_BASE_URL or model.base_url)")
+        chat = ChatOpenAI(model=settings.name, base_url=settings.base_url, api_key=key,
+                          temperature=settings.temperature, timeout=settings.request_timeout_s, max_retries=2)
+        return LangChainModel(chat, tools)
+    raise ValueError(f"unknown model provider {settings.provider!r} (supported: ollama, openai)")

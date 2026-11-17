@@ -12,11 +12,13 @@ import yaml
 
 @dataclass
 class ModelSettings:
-    provider: str = "ollama"  # "ollama" | "scripted" (tests only)
+    provider: str = "ollama"  # "ollama" | "openai" (any OpenAI-compatible API) | "scripted" (tests only)
     name: str = "qwen2.5-coder:14b"
     base_url: str = "http://localhost:11434"
     temperature: float = 0.0
-    num_ctx: int = 16384
+    num_ctx: int = 16384  # Ollama only; a remote server decides its own context window
+    api_key_env: str = "OPENAI_API_KEY"  # provider "openai": NAME of the env var holding the key (never the key)
+    request_timeout_s: float = 600.0  # provider "openai": per-request timeout
 
 
 @dataclass
@@ -143,9 +145,15 @@ def load_settings(path: str | Path) -> Settings:
         sandbox.dockerfile = str(rel(sandbox.dockerfile))
 
     model = _sub(ModelSettings, raw.get("model"))
-    # Allow overriding non-secret model settings from the environment.
+    # Allow overriding non-secret model settings from the environment (.env is loaded by the CLI).
+    provider = os.environ.get("HARNESS_PROVIDER", model.provider).strip().lower()
+    if provider != model.provider:
+        model.provider = provider
+        if provider == "openai":
+            model.base_url = ""  # the Ollama URL from the config does not apply
     model.name = os.environ.get("HARNESS_MODEL", model.name)
-    model.base_url = os.environ.get("OLLAMA_HOST", model.base_url)
+    url_env = "OPENAI_BASE_URL" if model.provider == "openai" else "OLLAMA_HOST"
+    model.base_url = os.environ.get(url_env, model.base_url)
 
     return Settings(
         model=model,
@@ -201,3 +209,29 @@ def load_projects(path: str | Path) -> ProjectRegistry:
                                       str(entry.get("description", "")))
     sessions = Path(raw.get("sessions_dir", "runs"))
     return ProjectRegistry(path, sessions if sessions.is_absolute() else (base / sessions).resolve(), projects)
+
+
+# ------------------------------------------------------------------ .env
+def load_dotenv(path: str | Path) -> list[str]:
+    """Load ``KEY=VALUE`` lines from a local ``.env`` into ``os.environ``.
+
+    Variables that are already set win. Returns the names that were set (never values).
+    The file is git-ignored; it is the place for the model API key. Only the model client
+    reads the key: sandboxes get an allow-listed environment and never see it.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return []
+    loaded = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.removeprefix("export ").partition("=")
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+            loaded.append(key)
+    return loaded

@@ -29,7 +29,7 @@ from rich.text import Text
 
 from .app import (cancel_session, resume_session, run_checks_only, session_review, settings_for_session,
                   start_session)
-from .config import load_projects, load_settings
+from .config import load_dotenv, load_projects, load_settings
 from .session import CancelToken, Session, SessionStore
 
 console = Console()
@@ -408,6 +408,7 @@ def cmd_graph(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv(Path.cwd() / ".env")  # model settings + API key; never passed to the sandbox
     p = argparse.ArgumentParser(prog="harness", description="LangGraph coding-agent harness (Stage 2)")
     p.add_argument("--projects", help="allowed projects file (default: projects.yaml or env HARNESS_PROJECTS)")
     sub = p.add_subparsers(dest="cmd", required=True)

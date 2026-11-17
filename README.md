@@ -11,7 +11,7 @@ Stage 1 behaviour (tools, permissions, limits, bug-fix workflow) is unchanged an
 
 ## Setup
 
-Requirements: Python 3.11+, git, [Ollama](https://ollama.com), and a container engine for the
+Requirements: Python 3.11+, git, a model (the FH endpoint with an API key, or local [Ollama](https://ollama.com)), and a container engine for the
 contained sandbox: Docker or Podman, installed natively or inside WSL (found automatically).
 Without one, add `--sandbox local` to the commands below (not an isolation boundary, see below).
 
@@ -30,14 +30,24 @@ so it contains `pyflakes`; otherwise the lint check is reported as **unavailable
 
 ### Model settings
 
-| Setting | Value used | Override |
-|---|---|---|
-| provider | local Ollama (`langchain-ollama`), no API key | – |
-| model | `qwen2.5-coder:14b` (Q4_K_M), temperature 0 | env `HARNESS_MODEL` |
-| context window | `num_ctx: 32768` (feature task), 16384 (Stage 1 tasks) | config `model.num_ctx` |
-| URL | `http://localhost:11434` | env `OLLAMA_HOST` |
+Two providers are supported. The project configs default to local Ollama; the `.env` file (git-ignored,
+loaded by the CLI, existing environment variables win) switches all projects to another provider.
 
-`.env.example` lists the non-secret overrides. No credentials are needed or read.
+| Setting | FH endpoint (used for the feature run) | Local Ollama (config default) | Override |
+|---|---|---|---|
+| provider | `openai` (`langchain-openai`, any OpenAI-compatible API) | `ollama` (`langchain-ollama`) | env `HARNESS_PROVIDER` |
+| model | `Qwen/Qwen3.6-35B-A3B`, temperature 0 | `qwen2.5-coder:14b` (Q4_K_M), temperature 0 | env `HARNESS_MODEL` |
+| URL | `YOUR_ENDPOINT_URL` | `http://localhost:11434` | env `OPENAI_BASE_URL` / `OLLAMA_HOST` |
+| key | env `OPENAI_API_KEY` (Bearer token) | none | config `model.api_key_env` |
+| context window | set by the server | `num_ctx: 32768` (feature), 16384 (Stage 1) | config `model.num_ctx` |
+
+```powershell
+copy .env.example .env      # then put your own key into OPENAI_API_KEY
+```
+
+The key is read only by the model client. It is never written to a session file, a log or the
+config, and never reaches executed code: the local sandbox gets an allow-listed environment and the
+container gets only `sandbox.env` (tested in `tests/test_model_provider.py`).
 
 ## Usage
 
@@ -308,7 +318,7 @@ and a smaller `context.max_chars`, for the recorded feature run.
 
 * Target repository: *Cosmic Python* / "Architecture Patterns with Python" by Harry Percival and Bob
   Gregory ([cosmicpython/code](https://github.com/cosmicpython/code), MIT-style license in `targets/`).
-* Libraries: LangGraph, LangChain Core, langchain-ollama, pydantic, rich, psutil, PyYAML, pytest, pyflakes.
+* Libraries: LangGraph, LangChain Core, langchain-ollama, langchain-openai, pydantic, rich, psutil, PyYAML, pytest, pyflakes.
 * The Stage 1 harness is my own code from Delivery 1; Stage 2 extends it.
 * AI help: the Stage 2 extension (navigation, context, sessions, resume, fix loop, CLI, tests, README)
   was written with the help of Claude Code (Anthropic, Claude Opus); I reviewed, ran and adjusted it.
