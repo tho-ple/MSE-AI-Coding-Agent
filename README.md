@@ -9,6 +9,10 @@ failed or unavailable check is never reported as passed.
 
 Stage 1 behaviour (tools, permissions, limits, bug-fix workflow) is unchanged and its tests still pass.
 
+**Video (3:49):** <https://www.youtube.com/watch?v=V8un1esMLDM> — what was implemented, the real-model
+feature run and the manual help. Slide and narration sources are in [`video/`](video/); the video was
+rendered with [showme-mp4](https://github.com/tho-ple/showme-mp4) (AI-generated voice, Kokoro TTS).
+
 ## Quick test (for reviewers, ~10 minutes)
 
 You need Python 3.11+, git and Docker Desktop (running). Steps 1–3 need **no model, no API key and
@@ -411,3 +415,6 @@ cancellation of a live model request: saved as `cancelled`, resumable).
 * The Stage 1 harness is my own code from Delivery 1; Stage 2 extends it.
 * AI help: the Stage 2 extension (navigation, context, sessions, resume, fix loop, CLI, model providers, setup, tests, README)
   was written with the help of Claude Code (Anthropic, Claude Opus); I reviewed, ran and adjusted it.
+* Video: slides and narration rendered with [showme-mp4](https://github.com/tho-ple/showme-mp4)
+  (`showme-render` v0.1.0; Kokoro text-to-speech, Mermaid, ffmpeg); the script was drafted with Claude Code
+  from this README.
