@@ -62,10 +62,10 @@ harness resume  <id>        # rechecks permissions + working copy, continues fro
 harness review  <id>        # changed files, final diff, check results, unfinished work
 ```
 
-**4. The real feature run with the FH model** (key from the FH LLM pilot, VPN connected):
+**4. The real feature run with the FH model** (FH endpoint URL + API key, VPN connected):
 
 ```powershell
-notepad .env                # OPENAI_API_KEY=<your key>  (the other settings were written by setup)
+notepad .env                # OPENAI_BASE_URL=<FH endpoint>, OPENAI_API_KEY=<your key>
 harness model-check         # OK tool call ok: add(...)
 harness start --project cosmic-feature --task-file examples/cosmic-feature/task.md
 harness review <id>
@@ -76,7 +76,7 @@ Local alternative without a key: `scripts\setup.ps1 -Provider local` (Ollama; sl
 
 ## Setup
 
-Requirements: Python 3.11+, git, a model (the FH endpoint with an API key, or local [Ollama](https://ollama.com)), and a container engine for the
+Requirements: Python 3.11+, git, a model (the FH OpenAI-compatible endpoint with URL and API key, or local [Ollama](https://ollama.com)), and a container engine for the
 contained sandbox: Docker or Podman, installed natively or inside WSL (found automatically).
 Without one, add `--sandbox local` to the commands below (not an isolation boundary, see below).
 
@@ -94,8 +94,8 @@ is a git submodule pinned to the starting commit `14c8479`; the setup script run
 `setup.ps1` (idempotent) creates `.venv` with the harness (`pip install -e ".[dev]"`), the target test
 environment `targets/.venv-cosmic` (incl. `pyflakes` for the lint check), builds the sandbox image
 `coding-harness-cosmic` (`harness build-image`), configures the model in `.env`, runs the test suite and
-finally `harness model-check` (one real tool call). With `-Provider fh` it writes the FH endpoint and
-model and keeps an existing key; with `-Provider local` it writes the Ollama settings and pulls the
+finally `harness model-check` (one real tool call). With `-Provider fh` it writes the FH model and keeps an
+existing endpoint URL and key; with `-Provider local` it writes the Ollama settings and pulls the
 model. Re-run it with the other `-Provider` to switch.
 If you built the image before Stage 2, rebuild it (`harness build-image --config examples/cosmic-feature/harness.yaml`)
 so it contains `pyflakes`; otherwise the lint check is reported as **unavailable** (never as passed).
@@ -109,7 +109,7 @@ loaded by the CLI, existing environment variables win) switches all projects to 
 |---|---|---|---|
 | provider | `openai` (`langchain-openai`, any OpenAI-compatible API) | `ollama` (`langchain-ollama`) | env `HARNESS_PROVIDER` |
 | model | `Qwen/Qwen3.6-35B-A3B`, temperature 0 | `qwen2.5-coder:14b` (Q4_K_M), temperature 0 | env `HARNESS_MODEL` |
-| URL | `YOUR_ENDPOINT_URL` | `http://localhost:11434` | env `OPENAI_BASE_URL` / `OLLAMA_HOST` |
+| URL | env `OPENAI_BASE_URL` (FH endpoint, not published here) | `http://localhost:11434` | env `OPENAI_BASE_URL` / `OLLAMA_HOST` |
 | key | env `OPENAI_API_KEY` (Bearer token) | none | config `model.api_key_env` |
 | context window | set by the server | `num_ctx: 32768` (feature), 16384 (Stage 1) | config `model.num_ctx` |
 

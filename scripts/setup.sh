@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # One-shot, idempotent setup for the coding harness (Linux / macOS). Same steps as setup.ps1.
 #
-#   sh scripts/setup.sh                         # everything, FH endpoint model (needs API key + FH network/VPN)
+#   sh scripts/setup.sh                         # everything, FH model (needs endpoint URL, API key + FH network/VPN)
 #   PROVIDER=local sh scripts/setup.sh          # everything, local Ollama model instead
 #   PROVIDER=local MODEL=qwen2.5-coder:7b sh scripts/setup.sh
 #   SKIP_DOCKER=1 sh scripts/setup.sh           # no sandbox image (local backend only)
@@ -59,7 +59,12 @@ if [ "$PROVIDER" = fh ]; then
   MODEL="${MODEL:-Qwen/Qwen3.6-35B-A3B}"
   set_env HARNESS_PROVIDER openai
   set_env HARNESS_MODEL "$MODEL"
-  set_env OPENAI_BASE_URL YOUR_ENDPOINT_URL
+  URL="$(get_env OPENAI_BASE_URL)"
+  if [ -z "$URL" ] || [ "$URL" = YOUR_ENDPOINT_URL ]; then
+    set_env OPENAI_BASE_URL ""
+    MODEL_READY=0
+    warn "Put the FH endpoint URL into .env (OPENAI_BASE_URL=https://.../v1)"
+  fi
   KEY="$(get_env OPENAI_API_KEY)"
   if [ -z "$KEY" ] || [ "$KEY" = YOUR_API_KEY ]; then
     set_env OPENAI_API_KEY ""

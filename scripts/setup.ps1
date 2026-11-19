@@ -1,6 +1,6 @@
 # One-shot, idempotent setup for the coding harness (Windows / PowerShell).
 #
-#   scripts\setup.ps1                          # everything, FH endpoint model (needs API key + FH network/VPN)
+#   scripts\setup.ps1                          # everything, FH model (needs endpoint URL, API key + FH network/VPN)
 #   scripts\setup.ps1 -Provider local          # everything, local Ollama model instead
 #   scripts\setup.ps1 -Provider local -Model qwen2.5-coder:7b
 #   scripts\setup.ps1 -SkipDocker              # no sandbox image (local backend only)
@@ -120,7 +120,12 @@ if ($Provider -eq "fh") {
     if (-not $Model) { $Model = "Qwen/Qwen3.6-35B-A3B" }
     Set-EnvLine "HARNESS_PROVIDER" "openai"
     Set-EnvLine "HARNESS_MODEL" $Model
-    Set-EnvLine "OPENAI_BASE_URL" "YOUR_ENDPOINT_URL"
+    $url = Get-EnvLine "OPENAI_BASE_URL"
+    if (-not $url -or $url -eq "YOUR_ENDPOINT_URL") {
+        Set-EnvLine "OPENAI_BASE_URL" ""
+        $ModelReady = $false
+        Write-Warning "Put the FH endpoint URL into .env (OPENAI_BASE_URL=https://.../v1)"
+    }
     $key = Get-EnvLine "OPENAI_API_KEY"
     if (-not $key -or $key -eq "YOUR_API_KEY") {
         Set-EnvLine "OPENAI_API_KEY" ""
